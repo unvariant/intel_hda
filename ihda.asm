@@ -1050,11 +1050,11 @@ dq address(%1), (%3 << 32) | %2
 PCM equ 0
 KHZ44.1 equ 1
 KHZ48   equ 0
-MULT    equ 0b000   ; 0 -> mult of 1, 1 -> mult of 2...
+MULT    equ 0b111   ; 0 -> mult of 1, 1 -> mult of 2...
 DIVISOR equ 0b000   ; 0 -> div  of 1, 1 -> div  of 2...
 BPS     equ 0b011   ; 0b100 -> 32 bits per sample
 CHAN    equ 0b0000  ; 0 -> channel 1, 1 -> channel 2...
-STREAM_FORMAT equ (PCM << 15) | (KHZ44.1 << 14) | (MULT << 13) | (DIVISOR << 8) | (BPS << 4) | CHAN
+STREAM_FORMAT equ (PCM << 15) | (KHZ44.1 << 14) | (MULT << 11) | (DIVISOR << 8) | (BPS << 4) | CHAN
 BDL_LEN equ 0x2000
 
     align 256
