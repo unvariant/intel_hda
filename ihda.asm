@@ -1050,10 +1050,10 @@ dq address(%1), (%3 << 32) | %2
 PCM equ 0
 KHZ44.1 equ 1
 KHZ48   equ 0
-MULT    equ 0      ; 0 -> mult of 1, 1 -> mult of 2...
-DIVISOR equ 1      ; 0 -> div  of 1, 1 -> div  of 2...
-BPS     equ 0b100  ; 0b100 -> 32 bits per sample
-CHAN    equ 0b0000 ; 0 -> 1 channel, 1 -> 2 channels...
+MULT    equ 0b000   ; 0 -> mult of 1, 1 -> mult of 2...
+DIVISOR equ 0b000   ; 0 -> div  of 1, 1 -> div  of 2...
+BPS     equ 0b011   ; 0b100 -> 32 bits per sample
+CHAN    equ 0b0000  ; 0 -> channel 1, 1 -> channel 2...
 STREAM_FORMAT equ (PCM << 15) | (KHZ44.1 << 14) | (MULT << 13) | (DIVISOR << 8) | (BPS << 4) | CHAN
 BDL_LEN equ 0x2000
 
@@ -1061,5 +1061,13 @@ BDL_LEN equ 0x2000
 _buffer_descriptor_list:
 BDL_entry _buffer0, 0x1000, 0
 BDL_entry _buffer1, 0x1000, 0
-_buffer0: times 0x1000 db 0xff
-_buffer1: times 0x1000 db 0xff
+_buffer0:
+times 0x100 dd 0xFFFFFF
+times 0x100 dd 0xFFFFFF
+times 0x100 dd 0xFFFFFF
+times 0x100 dd 0xFFFFFF
+_buffer1:
+times 0x100 dd 0xFFFFFF
+times 0x100 dd 0xFFFFFF
+times 0x100 dd 0xFFFFFF
+times 0x100 dd 0xFFFFFF
