@@ -64,7 +64,7 @@ check_int13_extensions:
     mov edi, 0x7e00
     mov esi, 1                  ; (ADDRESS(REST_OF_BOOT_START - BOOT_START)) >> 9
     mov ecx, BOOT_SECTORS
-    call disk_read
+    call int_13h_disk_read
 
 protected_mode:
     lgdt [gdt.desc]
@@ -76,7 +76,7 @@ protected_mode:
 ;;; edi -> 32 bit buffer address
 ;;; esi -> disk block number
 ;;; ecx -> number of sectors to transfer
-disk_read:
+int_13h_disk_read:
     mov ebx, 128
     mov dword [packet.block_low], esi
     mov dword [packet.buffer_offset], edi

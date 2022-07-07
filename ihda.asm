@@ -27,7 +27,7 @@ stage_2:
     push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) & 0xFFFFFFFF
     push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) >> 32
     push AUDIO_FILE_BUFFER
-    call ata_pio_read
+    call disk_read
 
     ;;; determines hda bus, device, and function numbers
     call find_hda
@@ -48,7 +48,7 @@ loop:
     call audio_file_init
     ;;; fills audio buffer as it plays
     call fill_audio_buffer
-    ;;; jmp loop
+    jmp loop
 
 hang:
     push _hang
@@ -98,6 +98,58 @@ turn_off_disk_irqs:
     mov dx, DEV_CNTL_REG
     mov al, NO_INT
     out dx, al
+    ret
+
+;;; ebp+0x14 -> sector count (32 bit number)
+;;; ebp+0x10 -> absolute disk block low (lower 32 bits)
+;;; ebp+0x0C -> absolute disk block high (upper 16 bits)
+;;; ebp+0x08 -> destination buffer
+;;; ZF clear on error
+disk_read:
+    push ebp
+    mov ebp, esp
+
+    push edi
+    push esi
+    push ebx
+
+    mov edi, 0xFFFF
+    mov ebx, dword [ebp+0x14]
+    mov edx, dword [ebp+0x10]
+    mov ecx, dword [ebp+0x0C]
+    mov eax, dword [ebp+0x08]
+    mov esi, ebx
+    cmp ebx, edi
+    cmovg esi, edi
+
+    push esi
+    push edx
+    push ecx
+    push eax
+.read:
+    call ata_pio_read
+    mov eax, dword [esp+0x0C]
+    add dword [esp+0x08], eax
+    adc dword [esp+0x04], 0
+    sub ebx, eax
+    shl eax, 9
+    add dword [esp+0x00], eax
+
+    mov esi, ebx
+    cmp ebx, edi
+    cmovg esi, edi
+    mov dword [esp+0x0C], esi
+
+    cmp ebx, 0
+    jg .read
+    
+    add esp, 0x10
+
+    pop ebx
+    pop esi
+    pop edi
+
+    leave
     ret
 
 ;;; can transfer max of 64 kb
@@ -390,7 +442,7 @@ audio_file_init:
     mov dword [audio_file.state], BDL_LEN
     ret
 
-FILL_RATE equ 2
+FILL_RATE equ 4
 
 fill_audio_buffer:
     mov eax, dword [hda.mmio]
@@ -1563,7 +1615,7 @@ BDL_LEN equ BDL_ENTRIES * 0x1000
 _buffer_descriptor_list:
 %assign i 0
 %rep BDL_ENTRIES
-%if (i + 1) % (BDL_ENTRIES >> 1) == 0
+%if (i + 1) % (BDL_ENTRIES / FILL_RATE) == 0
 BDL_ENTRY BUFFER_NAME(i), 0x1000, 1
 %else
 BDL_ENTRY BUFFER_NAME(i), 0x1000, 0
