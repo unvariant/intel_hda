@@ -1,7 +1,9 @@
     [BITS 32]
+    
 ;;; ebp+0x10.. -> parameters
 ;;; ebp+0x0C -> number of paramters
 ;;; ebp+0x08 -> format string
+
 printf:
     push ebp
     mov ebp, esp

@@ -1,5 +1,6 @@
     [BITS 32]
-STACK_TOP equ 0x200000
+STACK_TOP         equ 0x200000   ; 2 MB
+AUDIO_FILE_BUFFER equ 0x400000   ; 4 MB
 
 stage_2:
     mov ax, DATA_DESC
@@ -10,46 +11,48 @@ stage_2:
     mov ss, ax
     mov esp, STACK_TOP    ; 2 MB
 
+    push _ihda
+    call puts
+    add esp, 0x04
+
     call PIC_init
     call IDT_init_interrupts
 
+    ;;; IMPORTANT: enable interrupts
+    sti
+
+    call turn_off_disk_irqs
+
+    push (AUDIO_FILE_END - AUDIO_FILE_START) >> 9
+    push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) & 0xFFFFFFFF
+    push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) >> 32
+    push AUDIO_FILE_BUFFER
+    call ata_pio_read
+
+    ;;; determines hda bus, device, and function numbers
     call find_hda
+    ;;; attempts to find an audio function group (AFG)
+    ;;; then enumerates through all the codecs present in the audio function group
+    ;;; in each codec sorts the widgets it finds
     call hda_init
 
-    call test_audio
+    ;;; finds an output pin complex widget that is connected to an audio output widget
+    call find_outputs
 
-    mov esi, dword [hda.mmio]
-    mov dword [esi+DPUBASE], 0
-    mov dword [esi+DPLBASE], address(_debug_buffer) | 1   ; address macro defined in interrupt.asm
-    sub esp, 0x28
-.loop:
-    mov dword [cursor_offset], 0x780
-    mov eax, dword [_debug_buffer+28]
-    mov dword [esp+0x24], eax
-    mov eax, dword [_debug_buffer+24]
-    mov dword [esp+0x20], eax
-    mov eax, dword [_debug_buffer+20]
-    mov dword [esp+0x1C], eax
-    mov eax, dword [_debug_buffer+16]
-    mov dword [esp+0x18], eax
-    mov eax, dword [_debug_buffer+12]
-    mov dword [esp+0x14], eax
-    mov eax, dword [_debug_buffer+8]
-    mov dword [esp+0x10], eax
-    mov eax, dword [_debug_buffer+4]
-    mov dword [esp+0x0C], eax
-    mov eax, dword [_debug_buffer+0]
-    mov dword [esp+0x08], eax
-    mov dword [esp+0x04], 8
-    mov dword [esp+0x00], _debug_info
-    call printf
-    jmp .loop
-    add esp, 0x28
+    ;;; extract information from the audio file, expects wav format
+    call audio_file_info
+    ;;; plays test audio
+    call test_audio
+loop:
+    ;;; fills initial buffer
+    call audio_file_init
+    ;;; fills audio buffer as it plays
+    call fill_audio_buffer
+    ;;; jmp loop
 
 hang:
     push _hang
     call puts
-    hlt
     jmp $
 
 ;;; calling convention used follows the calling convention specified in the system V abi for i386
@@ -65,11 +68,366 @@ hang:
     add %1, %2                  ; calculate next heap address
     xchg %1, dword [heap_addr]  ; swap
 %endmacro
-_tmp: db `tmp:%x\n.`, 0
+
+IO_BASE          equ 0x1F0
+DATA_REG         equ 0x1F0
+SECTOR_COUNT_REG equ 0x1F2
+LBA_LOW          equ 0x1F3
+LBA_MID          equ 0x1F4
+LBA_HIGH         equ 0x1F5
+DRIVE_REG        equ 0x1F6
+CMD_REG          equ 0x1F7     ; writing to   0x1F7 writes to CMD_REG
+STS_REG          equ 0x1F7     ; reading from 0x1F7 returns   STS_REG
+READ_SECTORS_EXT equ 0x24
+
+STATUS_ERR       equ 1 << 0
+STATUS_IDX       equ 1 << 1
+STATUS_CDATA     equ 1 << 2
+STATUS_DRQ       equ 1 << 3    ; data is ready to r/w
+STATUS_SRV       equ 1 << 4
+STATUS_DF        equ 1 << 5    ; drive fault, does not set STATUS_ERR
+STATUS_RDY       equ 1 << 6
+STATUS_BSY       equ 1 << 7
+
+CONTROL_BASE     equ 0x3F6
+DEV_CNTL_REG     equ 0x3F6
+
+NO_INT           equ 1 << 1
+
+turn_off_disk_irqs:
+    mov dx, DEV_CNTL_REG
+    mov al, NO_INT
+    out dx, al
+    ret
+
+;;; can transfer max of 64 kb
+;;; ebp+0x14 -> sector count (16 bit number)
+;;; ebp+0x10 -> absolute disk block low (lower 32 bits)
+;;; ebp+0x0C -> absolute disk block high (upper 16 bits)
+;;; ebp+0x08 -> destination buffer
+;;; ZF clear on error
+ata_pio_read:
+    push ebp
+    mov ebp, esp
+
+    push edi
+    push ebx
+
+    mov edi, dword [ebp+0x08]
+    movzx ebx, word [ebp+0x14]
+    mov ecx, dword [ebp+0x10]
+    push ecx
+    shr ecx, 16
+    mov ah, cl
+
+    mov dx, DRIVE_REG
+    mov al, 1 << 6                ; set LBA bit
+    out dx, al
+
+    mov dx, SECTOR_COUNT_REG
+    mov al, bh
+    out dx, al                   ; send upper 8 bits of sector count
+    mov dx, LBA_LOW
+    mov al, ch
+    out dx, al                   ; LBA 3
+    mov dx, LBA_MID
+    mov cx, word [ebp+0x0C]
+    mov al, cl
+    out dx, al                   ; LBA 4
+    mov dx, LBA_HIGH
+    mov al, ch
+    out dx, al                   ; LBA 5
+
+    mov dx, SECTOR_COUNT_REG
+    mov al, bl
+    out dx, al                   ; send lower 8 bits of sector count
+    mov dx, LBA_LOW
+    pop ecx
+    mov al, cl
+    out dx, al                   ; LBA 0
+    mov dx, LBA_MID
+    mov al, ch
+    out dx, al                   ; LBA 1
+    mov dx, LBA_HIGH
+    mov al, ah
+    out dx, al                   ; LBA 2
+
+    mov dx, CMD_REG
+    mov al, READ_SECTORS_EXT
+    out dx, al
+
+    mov cl, 4
+.ignore_err:
+    in al, dx
+    test al, STATUS_BSY      ; if al & STATUS_BSY == 1 { 0 } else { 1 };
+    setz ch
+    test al, STATUS_DRQ      ; if al & STATUS_DRQ == 1 { 1 } else { 0 };
+    setnz ah
+    test ah, ch              ; ZF only clear when STATUS_BSY == 0 and STATUS_DRQ == 1
+    jnz .ready
+    dec cl
+    jnz .ignore_err
+
+.test_err:
+    in al, dx
+    test al, STATUS_BSY
+    jnz .test_err
+    test al, STATUS_ERR | STATUS_DF
+    jnz .end                 ; ZF clear when jmping to .end
+
+.ready:
+    inc byte [0xB8000]
+    mov dx, DATA_REG
+    mov cx, 256
+    rep insw
+    mov dx, STS_REG
+    in al, dx                ; delay 400ns to allow drive to set new values of BSY and DRQ
+    in al, dx
+    in al, dx
+    in al, dx
+
+    dec ebx
+    jnz .test_err
+    
+    in al, dx                ; if error detected ZF clear, otherwise ZF set
+    test al, STATUS_ERR | STATUS_DF
+
+.end:
+    pop ebx
+    pop edi
+    leave
+    ret
+
+RIFF_ID   equ 0x00
+FILE_SIZE equ 0x04
+WAVE_ID   equ 0x08
+FMT_ID    equ 0x0C
+FMT_LEN   equ 0x10
+FMT_TYPE  equ 0x14
+NUM_CHAN  equ 0x16
+SAMPLE_RATE equ 0x18
+BYTES_PER_SAMPLE equ 0x1C
+BYTES_PER_CHAN   equ 0x20
+BITS_PER_SAMPLE  equ 0x22
+DATA_ID   equ 0x24
+DATA_SIZE equ 0x28
+HEADER_SIZE equ 0x2C
+
+audio_file_info:
+    push esi
+
+    mov esi, AUDIO_FILE_BUFFER
+    mov eax, dword [esi+RIFF_ID]
+    mov edx, "RIFF"
+    cmp eax, edx
+    jnz .error
+
+    mov eax, dword [esi+WAVE_ID]
+    mov edx, "WAVE"
+    cmp eax, edx
+    jnz .error
+
+    mov eax, dword [esi+FMT_ID]
+    ;;; from what I have seen, software that generates wav files
+    ;;; can not seem to agree on what the last character is supposed to be
+    ;;; some use underscore, space, or null byte. Instead of trying to catch
+    ;;; all the cases only check the first three bytes and ignore the last byte
+    mov edx, "fmt"
+    and eax, 0xFFFFFF
+    cmp eax, edx
+    jnz .error
+
+    mov eax, dword [esi+FMT_LEN]
+    mov edx, 16
+    cmp eax, edx
+    jnz .error
+
+    mov eax, dword [esi+DATA_ID]
+    mov edx, "data"
+    cmp eax, edx
+    jnz .error
+
+    mov eax, dword [esi+FILE_SIZE]
+    mov edx, dword [esi+DATA_SIZE]
+    mov dword [audio_file.file_size], eax
+    mov dword [audio_file.data_size], edx
+    mov edi, audio_file.fmt_type
+    add esi, FMT_TYPE
+    mov ecx, 0x10
+    rep movsb
+.end:
+    pop esi
+    ret
+
+.error:
+    push eax
+    push edx
+    push 2
+    push _audio_file_expected
+    call printf
+    jmp hang
+
+;;; TODO: error if format is non-pcm?
+;;; returns audio file format in ax
+;;; derives format from audio_file struct
+audio_file_format:
+    ;;; zero edx or div will result in floating point exception
+    xor edx, edx
+    ;;; test for 44.1 khz base rate
+    mov ecx, 44100
+    mov eax, dword [audio_file.sample_rate]
+    cmp eax, ecx
+    jg .L0
+    ;;; if the sample rate is less than the base rate divide base rate by sample rate instead
+    ;;; do this by swapping the dividend and divisor
+    xchg eax, ecx
+.L0:
+    div ecx
+    ;;; if the remainder is zero this is the properly base rate
+    test edx, edx
+    jz .base_rate
+    ;;; otherwise test for 48 khz base rate
+    xor edx, edx
+    mov ecx, 48000
+    mov eax, dword [audio_file.sample_rate]
+    cmp eax, ecx
+    jg .L1
+    ;;; if the sample rate is less than the base rate divide base rate by sample rate instead
+    ;;; do this by swapping the dividend and divisor
+    xchg eax, ecx
+.L1:
+    div ecx
+    test edx, edx
+    ;;; if the remainder is still non-zero generate error
+    jnz .invalid_sample_rate
+.base_rate:
+    ;;; decrement dl because in the format
+    ;;; 0 -> 1
+    ;;; 1 -> 2
+    ;;; 2 -> 3
+    ;;; ...
+    ;;; to transform dl to a format number subtract one
+    ;;; eax holds the result of the division
+    lea edx, [eax - 1]
+    ;;; dl holds multiplier
+    ;;; dh holds divisor (defaults to zero)
+    cmp ecx, dword [audio_file.sample_rate]
+    jl .L2
+    ;;; if the base rate is greater than the sample rate
+    ;;; swap dl and dh to swap multiplier and divisor
+    xchg dl, dh
+.L2:
+    ;;; bit 14 = if base_rate == 44.1 khz { 1 } else { 0 }
+    cmp ecx, 44100
+    setz al
+    xor ah, ah
+    ;;; make space for multiplier
+    shl al, 3
+    ;;; set multiplier
+    or al, dl
+    ;;; make space for divisor
+    shl al, 3
+    ;;; set divisor
+    or al, dh
+    movzx edx, word [audio_file.bits_per_sample]
+    mov cx, word [audio_file.channels]
+    shl ax, 4
+    shr dx, 2
+    dec cx
+    ;;; set bits per sample (bps)
+    or al, byte [.bits_per_sample + edx]
+    shl ax, 4
+    ;;; set number of channels
+    or al, cl
+    push eax
+    movzx edx, al
+    and dl, 0b1111    ; chan
+    push edx
+    shr ax, 4
+    mov dl, al
+    and dl, 0b111     ; bps
+    push edx
+    shr ax, 4
+    mov dl, al
+    and dl, 0b111     ; divisor
+    push edx
+    shr ax, 3
+    mov dl, al
+    and dl, 0b111     ; multiplier
+    push edx
+    shr ax, 3
+    mov dl, al
+    and dl, 0b1       ; base rate
+    push edx
+    push 5
+    push _audio_file_format
+    call printf
+    add esp, 0x1C
+    pop eax
+    ret
+
+.invalid_sample_rate:
+    push _invalid_sample_rate
+    call puts
+    jmp hang
+
+.bits_per_sample:
+db 0, 0
+db 0
+db 0
+db 1
+db 2
+db 3
+db 0
+db 4
+
+audio_file_init:
+    mov esi, 0x400000 + HEADER_SIZE
+    mov edi, _buffer0
+    mov ecx, BDL_LEN
+    rep movsb
+    mov dword [audio_file.offset], BDL_LEN
+    mov dword [audio_file.state], BDL_LEN
+    ret
+
+FILL_RATE equ 2
+
+fill_audio_buffer:
+    mov eax, dword [hda.mmio]
+    mov edx, dword [eax+INTSTS]
+    test edx, 1 << 4
+    jz fill_audio_buffer
+    and edx, ~(1 << 4)
+    mov dword [eax+INTSTS], edx
+    xor eax, eax
+    mov edx, dword [audio_file.state]
+    add edx, BDL_LEN / FILL_RATE
+    cmp edx, BDL_LEN-1
+    cmovg edx, eax
+    mov dword [audio_file.state], edx
+    mov eax, dword [audio_file.offset]
+    lea edi, dword [_buffer0 + edx]
+    lea esi, dword [AUDIO_FILE_BUFFER + HEADER_SIZE + eax]
+    mov ecx, BDL_LEN / FILL_RATE
+    rep movsb
+    sub esi, AUDIO_FILE_BUFFER + HEADER_SIZE
+    mov dword [audio_file.offset], esi
+    mov eax, dword [audio_file.data_size]
+    cmp esi, eax
+    jl fill_audio_buffer
+    ret
+
 test_audio:
     push ebp
     mov ebp, esp
+    push edi
+    push esi
     push ebx
+
+    mov edi, dword [output.audio_output]
+    mov esi, dword [output.pin_complex]
+    movzx edi, byte [edi+W_NID]                 ; edi contains audio output node index
+    movzx esi, byte [esi+W_NID]                 ; esi contains pin complex  node index
 
     mov eax, dword [hda.mmio]
     movzx ecx, word [eax+0x00]
@@ -86,16 +444,8 @@ test_audio:
     call printf
 ;;; ebx contains offset to first output stream descriptor
     add ebx, 0x80
-    add ebx, dword [hda.mmio]
-
-    push eax
-    push ebx
-    push 1
-    push _tmp
-    call printf
-    add esp, 0x0C
-    pop eax
-
+    mov eax, dword [hda.mmio]
+    add ebx, eax
 ;;; set all SSYNC bits to stop all streams
     mov dword [eax+SSYNC], 0x3FFFFFFF
 ;;; turn output stream off by clearing run bit
@@ -110,22 +460,26 @@ test_audio:
 .confirm_end_stream_reset:
     test dword [ebx], 1
     jnz .confirm_end_stream_reset
-;;; set stream number
-    or dword [ebx], 1 << 20
+;;; set stream number & allow interrupt on buffer completion
+    or dword [ebx], (1 << 20) | (1 << 2)
 ;;; set cyclic buffer length
     mov dword [ebx+0x08], BDL_LEN
 ;;; set last valid index, once index is reached controller will restart at index 0
-    mov byte [ebx+0x0C], 1
+    mov byte [ebx+0x0C], BDL_ENTRIES - 1
 ;;; set stream format
-    mov word [ebx+0x12], STREAM_FORMAT
+    call audio_file_format
+    mov word [ebx+0x12], ax
 ;;; set BLD lower address
     mov dword [ebx+0x18], _buffer_descriptor_list
     mov dword [ebx+0x1C], 0
 ;;; set audio convert format
-;;; hard coded values for testing
-    mov dword [esp+0x08], 0x0200 | 0  ; set format verb
-    mov dword [esp+0x04], 0x02       ; node index 2, audio output
-    mov dword [esp+0x00], 0x00       ; codec 0
+    mov edx, dword [output.audio_output]
+    movzx edx, byte [edx+W_CODEC]
+    movzx eax, ax
+    or eax, 0x020000
+    mov dword [esp+0x08], eax         ; set format verb
+    mov dword [esp+0x04], edi         ; audio output node index
+    mov dword [esp+0x00], edx         ; codec address
     call codec_query
     test eax, edx
     jz .next0
@@ -134,7 +488,7 @@ test_audio:
     jmp hang
 .next0:
     mov dword [esp+0x08], 0x70700 | 0b1000000     ; set pin widget control verb, bit 6 set to enable pin complex
-    mov dword [esp+0x04], 0x03                    ; node index 3, pin complex
+    mov dword [esp+0x04], esi                     ; pin complex node index
     ;;; codec address already on stack
     call codec_query
     test eax, edx
@@ -144,22 +498,28 @@ test_audio:
     jmp hang
 .next1:
     mov dword [esp+0x08], 0x70600 | (1 << 4) | 1        ; set converter stream and channel, stream 1, channel 1
-    mov dword [esp+0x04], 0x02                          ; node index 2, audio output
+    mov dword [esp+0x04], edi                           ; audio output node index
     ;;; codec address already on stack
     call codec_query
     mov dword [esp+0x08], 0x70500 | 0                   ; set D0 (fully powered) state
     ;;; node index already on stack
     ;;; codec address already on stack
     call codec_query
-    mov dword [esp+0x08], 0x30000 | 0                   ; unmute audio output
+    mov eax, dword [output.audio_output]
+    movzx edx, byte [eax+W_OFFSET]
+    or edx, 0x30000 | (0 << 7)
+    mov dword [esp+0x08], edx                           ; unmute audio output
     ;;; node index already on stack
     ;;; codec address already on stack
     call codec_query
-    mov dword [ebx+SSYNC], 0        ; enable stream 1 in ssync
-    or dword [ebx], 0b10             ; set stream run bit
+    mov eax, dword [hda.mmio]
+    mov dword [eax+SSYNC], 0         ; enable stream 1 in ssync
+    or dword [ebx], 1 << 1           ; set stream run bit
 
     add esp, 0x10
     pop ebx
+    pop esi
+    pop edi
     leave
     ret
     ret
@@ -207,7 +567,7 @@ CORB_init:
     and dx, ~0x8000                 ;;; software verifies reset by clearing bit 15
     mov word [eax+CORBRP], dx
     mov dx, word [eax+CORBRP]
-    test dx, 0x8000  ;;; then checking the bit to make sure it is clear
+    test dx, 0x8000                 ;;; then checking the bit to make sure it is clear
     jnz .reset_CORB_rp_fail
 .reset_CORB_wp:
     mov word [eax+CORBWP], 0
@@ -270,7 +630,7 @@ RIRB_init:
     or dl, 1
     mov byte [eax+RIRBCTL], dl
 ;;; QEMU mishandles this number, 0 is supposed to be interpreted as 256
-;;; but QEMU interprets it as zero
+;;; but QEMU interprets it as zero, so instead set it as 255
     mov byte [eax+RINTCNT], 0xff
 ;;; RIRB on
     or byte [eax+RIRBCTL], 0b10
@@ -333,9 +693,7 @@ connection_list_info:
     push esi
     push ebx
     mov eax, dword [ebp+0x08]
-    xor ebx, ebx
-    test byte [eax+W_LONGFORM], 1
-    setnz bl
+    movzx ebx, byte [eax+W_LONGFORM]
     inc bl                     ; bl = if longform { 2 } else { 1 };
     mov dl, bl
     shl dl, 3
@@ -404,8 +762,10 @@ widget_info:
     push 0x00                  ; padding
     push 0xF0000 | 0x09        ; get paramter
     movzx eax, byte [ebp+0x0C] ; node index
+    mov byte [edi+W_NID], al
     push eax
     mov al, byte [ebp+0x08]    ; codec
+    mov byte [edi+W_CODEC], al
     push eax
     call codec_query
     shr eax, 20
@@ -689,7 +1049,7 @@ hda_init:
     jz .confirm_reset
 
     mov word [eax+WAKEEN], 0x7FFF
-    mov dword [eax+INTCTL], 0x800000FF
+    mov dword [eax+INTCTL], 0xC00000FF
 
     call CORB_init
     call RIRB_init
@@ -779,13 +1139,117 @@ find_hda:
     leave
     ret
 
-%macro __pci_config_addr 0
+;;; struct connection list {
+;;;     list: dd 0,
+;;;     long_form: db 0,
+;;; }
+;;; ebp+0x0C -> index
+;;; ebp+0x08 -> connection list struct
+connection_list_next:
+    push ebp
+    mov  ebp, esp
+    mov  eax, dword [ebp+0x08]
+    mov  edx, dword [ebp+0x0C]
+    mov  cl,  byte  [eax+0x04]
+    mov  eax, dword [eax]
+    shl  edx, cl
+    movzx eax, word [eax + edx]
+    shl  cl,  3
+    mov  dx,  0xFF
+    shl  dx,  cl
+    mov  dl,  0xFF
+    and  ax,  dx
+    leave
+    ret
+
+;;; ebp+0x10 -> node index
+;;; ebp+0x0C -> codec address
+;;; ebp+0x08 -> pointer to widget list
+widget_list_search:
+    push ebp
+    mov ebp, esp
+    mov eax, dword [ebp+0x08]
+    test eax, eax
+    jz .end
+    mov dh, byte [ebp+0x10]         ; dh contains node index
+    mov dl, byte [ebp+0x0C]         ; dl contains codec address
+.loop:
+    cmp dl, byte [eax+W_CODEC]
+    jnz .loopend
+    cmp dh, byte [eax+W_NID]
+    jz .end
+.loopend:
+    mov eax, dword [eax+W_NEXT]
+    test eax, eax
+    jnz .loop
+.end:
+    leave
+    ret
+
+find_outputs:
+    push ebp
+    mov ebp, esp
+    push edi
+    push esi
+    push ebx
+    sub esp, 0x08
+    mov ebx, dword [widgets.pin_complex]
+    test ebx, ebx
+    jz find_outputs_fail
+
+.loop_audio_outputs:
+    movzx eax, byte [ebx+W_CONLEN]
+    movzx edi, byte [ebx+W_CODEC]
+    lea esi, dword [ebx+W_CONLIST]
+    dec eax
+    js .continue
+    mov dword [esp+0x04], eax
+    mov dword [esp+0x00], esi
+
+.loop_connection_list:
+    call connection_list_next
+    push eax
+    push edi
+    push widgets.audio_output
+    call widget_list_search
+    add esp, 0x0C
+
+    mov dword [output.audio_output], eax
+    mov dword [output.pin_complex], ebx
+    test eax, eax
+    jnz .end
+
+    dec dword [esp+0x04]
+    jns .loop_connection_list
+
+.continue:
+    mov ebx, dword [ebx+W_NEXT]
+    test ebx, ebx
+    jnz .loop_audio_outputs
+    jmp find_outputs_fail
+
+.end:
+    add esp, 0x08
+    pop ebx
+    pop esi
+    pop edi
+    leave
+    ret
+
+find_outputs_fail:
+    push 0
+    push _find_outputs_fail
+    call printf
+    add esp, 0x08
+    jmp hang
+
+%macro PCI_CONFIG_ADDR 0
     mov ax, 0x8000
     mov al, byte [ebp+0x08]
     shl eax, 5
-    or al, byte[ebp+0x0C]
+    or al, byte  [ebp+0x0C]
     shl eax, 3
-    or al, byte [ebp+0x10]
+    or al, byte  [ebp+0x10]
     shl eax, 8
     mov al, byte [ebp+0x14]
 %endmacro
@@ -798,7 +1262,7 @@ pci_read:
     push ebp
     mov ebp, esp
 
-    __pci_config_addr
+    PCI_CONFIG_ADDR
     mov dx, 0xCF8
     out dx, eax
     mov dx, 0xCFC
@@ -816,7 +1280,7 @@ pci_write:
     push ebp
     mov ebp, esp
 
-    __pci_config_addr
+    PCI_CONFIG_ADDR
     mov dx, 0xCF8
     out dx, eax
     mov dx, 0xCFC
@@ -876,6 +1340,13 @@ _stream_io_info: db `output streams:%d,input streams:%d.\n`, 0
 _set_converter_format_fail: db `failed to set converter format.\n`, 0
 _enable_pin_complex_fail: db `failed to enable pin complex.\n`, 0
 _debug_info: db `0:%x,1:%x,2:%x,3:%x,4:%x,5:%x,6:%x,7:%x.\n`, 0
+_find_outputs_fail: db `failed to find output widgets\n`, 0
+_debug: db `audio output:%d.pin complex:%d\n`, 0
+_debug_int: db `INTSTS:%8x\n`, 0
+_ihda: db `IHDA START\n`, 0
+_audio_file_expected: db `expected %8x, found %8x\n`, 0
+_invalid_sample_rate: db `invalid sample rate. must be a multiple or divisor of 44.1 khz or 48 khz\n`, 0
+_audio_file_format: db `base rate:%d.mul:%d.div:%d.bps:%d.chan:%d.\n`, 0
 
 widget_types:
 dd _audio_output
@@ -927,7 +1398,7 @@ INSTRMPAY  equ 0x1A
 INTCTL     equ 0x20
 INTSTS     equ 0x24
 COUNTER    equ 0x30
-SSYNC      equ 0x38
+SSYNC      equ 0x34   ; according to the specification SSYNC is at offset 0x38, osdev wiki uses offset 0x34 and qemu also uses offset 0x34 (qemu-7.0.0/hw/audio/intel-hda-defs.h)
 CORBLBASE  equ 0x40
 CORBUBASE  equ 0x44
 CORBWP     equ 0x48
@@ -969,27 +1440,30 @@ afg:
 
 PINCAP_OUTPUT equ 1 << 4
 
-W_NEXT        equ 0x00
-W_TYPE        equ 0x04
-W_PINCAP      equ 0x05
-W_OFFSET      equ 0x09
-W_NUMSTEPS    equ 0x0A
-W_STEPSIZE    equ 0x0B
-W_MUTABLE     equ 0x0C
-W_LONGFORM    equ 0x0D
-W_CONLEN      equ 0x0E
-W_CONLIST     equ 0x0F
-W_VOLSTEPS    equ 0x13
-W_DELTA       equ 0x14
-W_SEQUENCE    equ 0x15
-W_ASSOCIATION equ 0x16
-W_MISC        equ 0x17
-W_COLOR       equ 0x18
-W_CONTYPE     equ 0x19
+W_NEXT           equ 0x00
+W_TYPE           equ 0x04
+W_PINCAP         equ 0x05
+W_OFFSET         equ 0x09
+W_NUMSTEPS       equ 0x0A
+W_STEPSIZE       equ 0x0B
+W_MUTABLE        equ 0x0C
+W_CONLEN         equ 0x0D
+W_CONLIST        equ 0x0E
+W_LONGFORM       equ 0x12
+W_VOLSTEPS       equ 0x13
+W_DELTA          equ 0x14
+W_SEQUENCE       equ 0x15
+W_ASSOCIATION    equ 0x16
+W_MISC           equ 0x17
+W_COLOR          equ 0x18
+W_CONTYPE        equ 0x19
 W_DEVICEDEFAULT  equ 0x1A
-W_LOCATION    equ 0x1B
-W_PORTCON     equ 0x1C
-W_SIZE        equ 0x20
+W_LOCATION       equ 0x1B
+W_PORTCON        equ 0x1C
+W_CODEC          equ 0x1D
+W_NID            equ 0x1E
+
+W_SIZE           equ 0x20
 
 ;;; example entry in widget forward only linked list
 ;;; sizeof(widget) = 32 bytes
@@ -1001,10 +1475,10 @@ W_SIZE        equ 0x20
 ;;; .num_steps: db 0
 ;;; .step_size: db 0
 ;;; .mutable:   db 0
-;;; ;;; see section 7.1.2
-;;; .long_form: db 0
+;;; ;;; see section 7.1.2 of intel hda docs
 ;;; .connection_list_len: db 0
 ;;; .connection_list: dd 0
+;;; .long_form: db 0
 ;;; .volume_steps: db 0
 ;;; .delta:     db 0
 ;;; .sequence:  db 0
@@ -1015,24 +1489,43 @@ W_SIZE        equ 0x20
 ;;; .device_default: db 0
 ;;; .location: db 0
 ;;; .port_connectivity: db 0
+;;; .codec_address: db 0
+;;; .node_index: db 0
 
 widgets:
-audio_output:   dd 0
-audio_input:    dd 0
-audio_mixer:    dd 0
-audio_selector: dd 0
-pin_complex:    dd 0
-power:          dd 0
-volume_knob:    dd 0
-beep_generator: dd 0
+.audio_output:   dd 0
+.audio_input:    dd 0
+.audio_mixer:    dd 0
+.audio_selector: dd 0
+.pin_complex:    dd 0
+.power:          dd 0
+.volume_knob:    dd 0
+.beep_generator: dd 0
 ;;; unknown widgets
 times 7 dd 0
-vendor_defined: dd 0
+.vendor_defined: dd 0
+
+output:
+.audio_output: dd 0
+.pin_complex: dd 0
 
 sizes:
 dw 2      ; 0b00 (0) -> 2 entries
 dw 16     ; 0b01 (1) -> 16 entries
 dw 256    ; 0b10 (2) -> 256 entries
+
+;;; https://web.archive.org/web/20120113025807/http://technology.niagarac.on.ca:80/courses/ctec1631/WavFileFormat.html
+audio_file:
+.file_size:         dd 0
+.data_size:         dd 0
+.fmt_type:          dw 0
+.channels:          dw 0
+.sample_rate:       dd 0
+.bytes_per_second:  dd 0
+.bytes_per_sample:  dw 0
+.bits_per_sample:   dw 0
+.offset:            dd 0
+.state:             dd 0
 
 ;;; set heap bottom to stack top
 heap_addr: dd STACK_TOP
@@ -1042,11 +1535,6 @@ _CORB_buffer: times 1024 db 0
 _RIRB_buffer: times 2048 db 0
 _debug_buffer: times 1024 db 0
 
-;;; NOTE: address macro defined in interrupt.asm
-%macro BDL_entry 3
-dq address(%1), (%3 << 32) | %2
-%endmacro
-
 PCM equ 0
 KHZ44.1 equ 1
 KHZ48   equ 0
@@ -1055,19 +1543,42 @@ DIVISOR equ 0b000   ; 0 -> div  of 1, 1 -> div  of 2...
 BPS     equ 0b011   ; 0b100 -> 32 bits per sample
 CHAN    equ 0b0000  ; 0 -> channel 1, 1 -> channel 2...
 STREAM_FORMAT equ (PCM << 15) | (KHZ44.1 << 14) | (MULT << 11) | (DIVISOR << 8) | (BPS << 4) | CHAN
-BDL_LEN equ 0x2000
+
+;;; annoyingly nasm decided to handle `align 4096` by padding the beginning of the file
+;;; which of course messes up the bootloader code
+%define __ALIGN_UP__(x, alignment) ((x + alignment - 1) & ~(alignment - 1))
+%define __ALIGN__(alignment) times (__ALIGN_UP__(ADDRESS($), alignment) - ADDRESS($)) db 0
+
+%define BUFFER_NAME(x) _buffer %+ x
+
+;;; NOTE: address macro defined in interrupt.asm
+%macro BDL_ENTRY 3
+dq ADDRESS(%1), (%3 << 32) | %2
+%endmacro
+
+BDL_ENTRIES equ 32
+BDL_LEN equ BDL_ENTRIES * 0x1000
 
     align 256
 _buffer_descriptor_list:
-BDL_entry _buffer0, 0x1000, 0
-BDL_entry _buffer1, 0x1000, 0
-_buffer0:
-times 0x100 dd 0xFFFFFF
-times 0x100 dd 0xFFFFFF
-times 0x100 dd 0xFFFFFF
-times 0x100 dd 0xFFFFFF
-_buffer1:
-times 0x100 dd 0xFFFFFF
-times 0x100 dd 0xFFFFFF
-times 0x100 dd 0xFFFFFF
-times 0x100 dd 0xFFFFFF
+%assign i 0
+%rep BDL_ENTRIES
+%if (i + 1) % (BDL_ENTRIES >> 1) == 0
+BDL_ENTRY BUFFER_NAME(i), 0x1000, 1
+%else
+BDL_ENTRY BUFFER_NAME(i), 0x1000, 0
+%endif
+%assign i i+1
+%endrep
+
+    __ALIGN__(4096)
+%assign i 0
+%rep BDL_ENTRIES
+BUFFER_NAME(i):
+%if i % 2 == 0
+times 0x400 dd 0x010101 * (0xFF - i)
+%else
+times 0x400 dd 0x000000
+%endif
+%assign i i+1
+%endrep

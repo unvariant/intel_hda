@@ -1,6 +1,8 @@
     [ORG 0x7c00]
     [BITS 16]
 
+%define ADDRESS(x) (BASE_ADDR + x - $$)
+
     BOOT_START equ 0x7c00
     BASE_ADDR  equ BOOT_START
     global _start
@@ -19,7 +21,7 @@ _start:
     int 10h
 
     cld
-    cli
+    sti
 
 ;;; https://wiki.osdev.org/A20_Line
 test_A20:
@@ -33,20 +35,20 @@ A20_set:
 
 ;;; https://wiki.osdev.org/Unreal_Mode
 ;    push ds                 ; save real mode
-;    lgdt [gdt.desc] ; load gdt register
-;    
+;    lgdt [gdt.desc]         ; load gdt register
+   
 ;    mov  eax, cr0           ; switch to pmode by
 ;    or al, 1                ; set pmode bit
 ;    mov  cr0, eax
-;    
+   
 ;    jmp tmp_protected_mode  ; tell 386/486 to not crash
-;tmp_protected_mode:
+; tmp_protected_mode:
 ;    mov  bx, DATA_DESC      ; select descriptor 2
 ;    mov  ds, bx
-;    
+   
 ;    and al, ~1              ; back to realmode
 ;    mov  cr0, eax           ; by toggling bit again
-;    
+   
 ;    pop ds                  ; get back old segment
 
 ;;; https://wiki.osdev.org/Disk_access_using_the_BIOS_(INT_13h)
@@ -59,19 +61,32 @@ check_int13_extensions:
     jc error
     add sp, 2
 
-load_rest_of_bootloader:
-    mov ecx, BOOT_SECTORS
-    mov ebx, 128
     mov edi, 0x7e00
+    mov esi, 1                  ; (ADDRESS(REST_OF_BOOT_START - BOOT_START)) >> 9
+    mov ecx, BOOT_SECTORS
+    call disk_read
+
+protected_mode:
+    lgdt [gdt.desc]
+    mov eax, cr0
+    or al, 1
+    mov cr0, eax
+    jmp 0x08:stage_2
+
+;;; edi -> 32 bit buffer address
+;;; esi -> disk block number
+;;; ecx -> number of sectors to transfer
+disk_read:
+    mov ebx, 128
+    mov dword [packet.block_low], esi
+    mov dword [packet.buffer_offset], edi
+    shl word [packet.buffer_segment], 12
 .loop:
     mov eax, ecx
     cmp eax, ebx
     cmovg eax, ebx
     mov word [packet.block_count], ax
     push eax
-    push ebx
-    push ecx
-    push edi
     push _sectors_not_equal
     push ax
     push _disk_read_error
@@ -82,14 +97,11 @@ load_rest_of_bootloader:
     mov si, packet
     int 13h
     jc error
-    add sp, 2
-    pop ax
+    pop ax     ; pop error message off stack
+    pop ax     ; pop original block count off stack
     cmp ax, word [packet.block_count]
     jnz error
-    add sp, 2
-    pop edi
-    pop ecx
-    pop ebx
+    pop ax     ; pop error message off stack
     pop eax
     add dword [packet.block_low], eax
     sub ecx, eax
@@ -100,13 +112,7 @@ load_rest_of_bootloader:
     ;;; loop while greater than zero
     cmp ecx, 0
     jg .loop
-
-protected_mode:
-    lgdt [gdt.desc]
-    mov eax, cr0
-    or al, 1
-    mov cr0, eax
-    jmp 0x08:stage_2
+    ret
 
 error:
     pop si
@@ -144,13 +150,14 @@ gdt:
        dw 0
 
 BOOT_SECTORS equ (BOOT_END - REST_OF_BOOT_START) >> 9
+AUDIO_FILE_SECTORS equ (AUDIO_FILE_END - AUDIO_FILE_START) >> 9
 
 packet:
 .size           dw 16
 .block_count    dw 0
-.buffer_offset  dw 0x7e00
+.buffer_offset  dw 0
 .buffer_segment dw 0
-.block_low      dd 1
+.block_low      dd 0
 .block_high     dw 0
                 dw 0
 
@@ -171,3 +178,4 @@ _int13_extensions_not_supported: db "int 13h extensions not supported.", 0
     %include "interrupt.asm"
     %include "ihda.asm"
     %include "bootend.asm"
+    %include "audio_file.asm"

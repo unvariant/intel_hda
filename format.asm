@@ -1,4 +1,5 @@
     [BITS 32]
+    
 ;;; ebp+0x14.. -> parameters
 ;;; ebp+0x10 -> number of parameters
 ;;; ebp+0x0C -> buffer
@@ -10,6 +11,7 @@ format:
     push esi
     push edi
     sub esp, 4
+
     mov esi, dword [ebp+0x08]
     mov edi, dword [ebp+0x0C]
     mov ebx, 0x14
@@ -38,12 +40,17 @@ format:
     cmp byte [esi], 0
     jnz .loop
     mov byte [edi], 0
+
+.end:
     add esp, 4
     pop edi
     pop esi
     pop ebx
     leave
+    ret
+
 .unimplemented:
+    add esp, 0x0C
     ret
 
     align 8

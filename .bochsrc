@@ -1,0 +1,4 @@
+pci: enabled=1, chipset=i440fx
+boot: disk
+ata0-master: type=disk, mode=flat, path=OS.bin, translation=none
+display_library: carbon

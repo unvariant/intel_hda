@@ -1,3 +1,5 @@
+    [BITS 32]
+
 ;;; programmable interrupt controller (PIC) is different from
 ;;; the peripheral component interconnect (PCI)
 ;;; PCI is for communicating with a locating peripheral devices
@@ -31,114 +33,172 @@ PRIMARY_PIC_VECTOR   equ 0x20
 SECONDARY_PIC_VECTOR equ 0x28
 
 ;;; outputs byte from al to port
-%macro outb 2
+%macro OUTB 2
     mov dx, %1
     mov al, %2
     out dx, al
 %endmacro
 
 ;;; returns byte in al from port
-%macro inb 1
+%macro INB 1
     mov dx, %1
     in al, dx
 %endmacro
 
-%macro io_wait 0
+%macro IO_WAIT 0
     out 0x80, al
 %endmacro
 
 ;;; returns secondary irq reg in ah
 ;;; returns primary irq reg in al
-%macro PIC_get_irq_reg 1
-    outb PRIMARY_PIC_CMD, %1
-    outb SECONDARY_PIC_CMD, %1
-    inb SECONDARY_PIC_CMD
+%macro PIC_GET_IRQ_REG 1
+    OUTB PRIMARY_PIC_CMD, %1
+    OUTB SECONDARY_PIC_CMD, %1
+    INB SECONDARY_PIC_CMD
     mov ah, al
-    inb PRIMARY_PIC_CMD
+    INB PRIMARY_PIC_CMD
 %endmacro
 
-%macro PIC_get_irr 0
-    PIC_get_irq_reg PIC_READ_IRR
+%macro PIC_GET_IRR 0
+    PIC_GET_IRQ_REG PIC_READ_IRR
 %endmacro
 
-%macro PIC_get_isr 0
-    PIC_get_irq_reg PIC_READ_ISR
+%macro PIC_GET_ISR 0
+    PIC_GET_IRQ_REG PIC_READ_ISR
 %endmacro
 
 ;;; initializes primary and secondary PIC
 ;;; remaps primary interrupt vector to int 0x20..0x28
 ;;; remaps secondary interrupt vector to int 0x28..0x30
 PIC_init:
-    inb PRIMARY_PIC_DATA
+    ; save masks
+    INB PRIMARY_PIC_DATA
     mov bl, al
-    inb SECONDARY_PIC_DATA
+    INB SECONDARY_PIC_DATA
     mov bh, al
 
-    outb PRIMARY_PIC_CMD, ICW1_INIT | ICW1_ICW4
-    io_wait
-    outb SECONDARY_PIC_CMD, ICW1_INIT | ICW1_ICW4
-    io_wait
-    outb PRIMARY_PIC_DATA, PRIMARY_PIC_VECTOR
-    io_wait
-    outb SECONDARY_PIC_DATA, SECONDARY_PIC_VECTOR
-    io_wait
-    outb PRIMARY_PIC_DATA, 0b100
-    io_wait
-    outb SECONDARY_PIC_DATA, 0b10
-    io_wait
-    outb PRIMARY_PIC_DATA, ICW4_8086
-    io_wait
-    outb SECONDARY_PIC_DATA, ICW4_8086
-    io_wait
+    OUTB PRIMARY_PIC_CMD, ICW1_INIT | ICW1_ICW4
+    IO_WAIT
+    OUTB SECONDARY_PIC_CMD, ICW1_INIT | ICW1_ICW4
+    IO_WAIT
+    OUTB PRIMARY_PIC_DATA, PRIMARY_PIC_VECTOR
+    IO_WAIT
+    OUTB SECONDARY_PIC_DATA, SECONDARY_PIC_VECTOR
+    IO_WAIT
+    OUTB PRIMARY_PIC_DATA, 0b100
+    IO_WAIT
+    OUTB SECONDARY_PIC_DATA, 0b10
+    IO_WAIT
+    OUTB PRIMARY_PIC_DATA, ICW4_8086
+    IO_WAIT
+    OUTB SECONDARY_PIC_DATA, ICW4_8086
+    IO_WAIT
 
-    outb PRIMARY_PIC_DATA, bl
-    outb SECONDARY_PIC_DATA, bh
+    ; restore masks
+    OUTB PRIMARY_PIC_DATA, bl
+    OUTB SECONDARY_PIC_DATA, bh
+
+    OUTB PRIMARY_PIC_DATA, 0x00
+    OUTB SECONDARY_PIC_DATA, 0x00
     ret
 
 PIC_send_EOI:
     cmp al, 8
     jl .skip_secondary
-    outb SECONDARY_PIC_CMD, PIC_EOI
+    OUTB SECONDARY_PIC_CMD, PIC_EOI
 .skip_secondary:
-    outb PRIMARY_PIC_CMD, PIC_EOI
+    OUTB PRIMARY_PIC_CMD, PIC_EOI
     ret
+
+%macro PIC_SEND_EOI 1
+    push eax
+    push edx
+%if %1 > 7
+    OUTB SECONDARY_PIC_CMD, PIC_EOI
+%endif
+OUTB PRIMARY_PIC_CMD, PIC_EOI
+    pop edx
+    pop eax
+%endmacro
 
 IDT_init_interrupts:
     lidt [IDT.desc]
     ret
 
-%define address(x) (BASE_ADDR + x - $$)
-
-%macro __IDT_entry 2
-    dq (address(%1) >> 16 << 48) | (1 << 47) | (%2 << 40) | (CODE_DESC << 16) | (address(%1) & 0xFFFF)
-%endmacro
+%define IDT_ENTRY(handler, type) ((ADDRESS(handler) >> 16 << 48) | (1 << 47) | (type << 40) | (CODE_DESC << 16) | (ADDRESS(handler) & 0xFFFF))
 
 IDT_INT32  equ 0x0E
 IDT_TRAP32 equ 0x0F
 
-%define IDT_int32(x) __IDT_entry x, IDT_INT32
-%define IDT_trap32(x) __IDT_entry x, IDT_TRAP32
+%define IDT_INT32(x) IDT_ENTRY(x, IDT_INT32)
+%define IDT_TRAP32(x) IDT_ENTRY(x, IDT_TRAP32)
 
-%define IDT_name(x) IDT_interrupt %+ x
-
-%macro stub_IDT_entry 1
-IDT_name(%1):
-    mov word [0xB8000], 0x0F41
+int32_handler:
     iret
-%endmacro
 
-%assign i 0
-%rep    256
-stub_IDT_entry i
-%assign i i+1
-%endrep
+trap32_handler:
+    iret
 
+trap32_error_handler:
+    pop eax
+    iret
+
+tick:
+    PIC_SEND_EOI 0
+    iret
+
+test:
+    push eax
+    mov eax, dword [cursor_offset]
+    mov dword [0xB8000 + eax], 0x0F410F5A
+    add eax, 4
+    mov dword [cursor_offset], eax
+    pop eax
+    PIC_SEND_EOI 1
+    iret
+
+%assign INT32_ENTRY         IDT_INT32(int32_handler)
+%assign TRAP32_ENTRY        IDT_TRAP32(trap32_handler)
+%assign TRAP32_ERROR_ENTRY  IDT_TRAP32(trap32_error_handler)
+
+;;; https://wiki.osdev.org/Exceptions
 IDT:
-%assign i 0
-%rep    256
-IDT_int32(IDT_name(i))
-%assign i i+1
-%endrep
-.desc:
+;;; first 32 entries are common exceptions
+;;; that occur in protected mode
+div_by_zero:                    dq TRAP32_ENTRY
+debug:                          dq TRAP32_ENTRY
+non_masked_interrupt:           dq INT32_ENTRY
+breakpoint:                     dq TRAP32_ENTRY
+overflow:                       dq TRAP32_ENTRY
+bound_range_exceeded:           dq TRAP32_ENTRY
+illegal_opcode:                 dq TRAP32_ENTRY
+device_not_available:           dq TRAP32_ENTRY
+double_fault:                   dq TRAP32_ERROR_ENTRY
+coprocessor_segment_overrun:    dq TRAP32_ENTRY
+invalid_tss:                    dq TRAP32_ERROR_ENTRY
+segment_not_present:            dq TRAP32_ERROR_ENTRY
+stack_segment_fault:            dq TRAP32_ERROR_ENTRY
+general_protection_fault:       dq TRAP32_ERROR_ENTRY
+page_fault:                     dq TRAP32_ERROR_ENTRY
+dq 0
+x87_fpu_exception:              dq TRAP32_ENTRY
+alignment_check:                dq TRAP32_ERROR_ENTRY
+machine_check:                  dq TRAP32_ENTRY
+simd_fpu_exception:             dq TRAP32_ENTRY
+virtualization_exception:       dq TRAP32_ENTRY
+control_protection_exception:   dq TRAP32_ERROR_ENTRY
+times 6 dq 0
+hypervisor_injection_exception: dq TRAP32_ENTRY
+vmm_communication_exception:    dq TRAP32_ERROR_ENTRY
+security_exception:             dq TRAP32_ERROR_ENTRY
+dq 0
+;;; next 8 are IRQ 0..7
+;dq tick
+;dq test
+times 8 dq 0
+;;; next 8 are IRG 8..15
+times 8 dq 0
+times (256-32-16) dq 0
+IDT.desc:
 dw 256*8-1
 dd IDT
