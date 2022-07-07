@@ -1,5 +1,5 @@
     [BITS 32]
-    
+
 ;;; ebp+0x14.. -> parameters
 ;;; ebp+0x10 -> number of parameters
 ;;; ebp+0x0C -> buffer
@@ -94,12 +94,11 @@ atoi:
     xor eax, eax
 .loop:
     lodsb         ;;; load next char, might be numeric
-    cmp al, 0x30
-    jb .end
-    cmp al, 0x39
+    sub al, 0x30
+    js .end
+    cmp al, 0x09
     ja .end
-    lea ebx, [ebx*4+ebx-0x18]
-    shl ebx, 1
+    imul ebx, 10
     add ebx, eax
     jmp .loop
 .end:
