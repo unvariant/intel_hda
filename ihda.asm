@@ -69,37 +69,6 @@ hang:
     xchg %1, dword [heap_addr]  ; swap
 %endmacro
 
-IO_BASE          equ 0x1F0
-DATA_REG         equ 0x1F0
-SECTOR_COUNT_REG equ 0x1F2
-LBA_LOW          equ 0x1F3
-LBA_MID          equ 0x1F4
-LBA_HIGH         equ 0x1F5
-DRIVE_REG        equ 0x1F6
-CMD_REG          equ 0x1F7     ; writing to   0x1F7 writes to CMD_REG
-STS_REG          equ 0x1F7     ; reading from 0x1F7 returns   STS_REG
-READ_SECTORS_EXT equ 0x24
-
-STATUS_ERR       equ 1 << 0
-STATUS_IDX       equ 1 << 1
-STATUS_CDATA     equ 1 << 2
-STATUS_DRQ       equ 1 << 3    ; data is ready to r/w
-STATUS_SRV       equ 1 << 4
-STATUS_DF        equ 1 << 5    ; drive fault, does not set STATUS_ERR
-STATUS_RDY       equ 1 << 6
-STATUS_BSY       equ 1 << 7
-
-CONTROL_BASE     equ 0x3F6
-DEV_CNTL_REG     equ 0x3F6
-
-NO_INT           equ 1 << 1
-
-turn_off_disk_irqs:
-    mov dx, DEV_CNTL_REG
-    mov al, NO_INT
-    out dx, al
-    ret
-
 ;;; ebp+0x14 -> sector count (32 bit number)
 ;;; ebp+0x10 -> absolute disk block low (lower 32 bits)
 ;;; ebp+0x0C -> absolute disk block high (upper 16 bits)
@@ -152,7 +121,39 @@ disk_read:
     leave
     ret
 
-;;; can transfer max of 64 kb
+
+IO_BASE          equ 0x1F0
+DATA_REG         equ 0x1F0
+SECTOR_COUNT_REG equ 0x1F2
+LBA_LOW          equ 0x1F3
+LBA_MID          equ 0x1F4
+LBA_HIGH         equ 0x1F5
+DRIVE_REG        equ 0x1F6
+CMD_REG          equ 0x1F7     ; writing to   0x1F7 writes to CMD_REG
+STS_REG          equ 0x1F7     ; reading from 0x1F7 returns   STS_REG
+READ_SECTORS_EXT equ 0x24
+
+STATUS_ERR       equ 1 << 0
+STATUS_IDX       equ 1 << 1
+STATUS_CDATA     equ 1 << 2
+STATUS_DRQ       equ 1 << 3    ; data is ready to r/w
+STATUS_SRV       equ 1 << 4
+STATUS_DF        equ 1 << 5    ; drive fault, does not set STATUS_ERR
+STATUS_RDY       equ 1 << 6
+STATUS_BSY       equ 1 << 7
+
+CONTROL_BASE     equ 0x3F6
+DEV_CNTL_REG     equ 0x3F6
+
+NO_INT           equ 1 << 1
+
+turn_off_disk_irqs:
+    mov dx, DEV_CNTL_REG
+    mov al, NO_INT
+    out dx, al
+    ret
+
+;;; can transfer max of 32 MB
 ;;; ebp+0x14 -> sector count (16 bit number)
 ;;; ebp+0x10 -> absolute disk block low (lower 32 bits)
 ;;; ebp+0x0C -> absolute disk block high (upper 16 bits)
@@ -228,7 +229,7 @@ ata_pio_read:
     jnz .end                 ; ZF clear when jmping to .end
 
 .ready:
-    inc byte [0xB8000]
+    inc byte [0xB8000]       ; indicate spin loop
     mov dx, DATA_REG
     mov cx, 256
     rep insw
@@ -434,7 +435,7 @@ db 0
 db 4
 
 audio_file_init:
-    mov esi, 0x400000 + HEADER_SIZE
+    mov esi, AUDIO_FILE_BUFFER + HEADER_SIZE
     mov edi, _buffer0
     mov ecx, BDL_LEN
     rep movsb
@@ -1391,10 +1392,7 @@ _connection_list_entry: db `entry:%4x.\n`, 0
 _stream_io_info: db `output streams:%d,input streams:%d.\n`, 0
 _set_converter_format_fail: db `failed to set converter format.\n`, 0
 _enable_pin_complex_fail: db `failed to enable pin complex.\n`, 0
-_debug_info: db `0:%x,1:%x,2:%x,3:%x,4:%x,5:%x,6:%x,7:%x.\n`, 0
 _find_outputs_fail: db `failed to find output widgets\n`, 0
-_debug: db `audio output:%d.pin complex:%d\n`, 0
-_debug_int: db `INTSTS:%8x\n`, 0
 _ihda: db `IHDA START\n`, 0
 _audio_file_expected: db `expected %8x, found %8x\n`, 0
 _invalid_sample_rate: db `invalid sample rate. must be a multiple or divisor of 44.1 khz or 48 khz\n`, 0
@@ -1585,7 +1583,6 @@ heap_addr: dd STACK_TOP
     align 256
 _CORB_buffer: times 1024 db 0
 _RIRB_buffer: times 2048 db 0
-_debug_buffer: times 1024 db 0
 
 PCM equ 0
 KHZ44.1 equ 1
@@ -1615,11 +1612,7 @@ BDL_LEN equ BDL_ENTRIES * 0x1000
 _buffer_descriptor_list:
 %assign i 0
 %rep BDL_ENTRIES
-%if (i + 1) % (BDL_ENTRIES / FILL_RATE) == 0
-BDL_ENTRY BUFFER_NAME(i), 0x1000, 1
-%else
-BDL_ENTRY BUFFER_NAME(i), 0x1000, 0
-%endif
+BDL_ENTRY BUFFER_NAME(i), 0x1000, ((i + 1) % (BDL_ENTRIES / FILL_RATE) == 0)
 %assign i i+1
 %endrep
 
@@ -1627,10 +1620,6 @@ BDL_ENTRY BUFFER_NAME(i), 0x1000, 0
 %assign i 0
 %rep BDL_ENTRIES
 BUFFER_NAME(i):
-%if i % 2 == 0
-times 0x400 dd 0x010101 * (0xFF - i)
-%else
-times 0x400 dd 0x000000
-%endif
+times 0x200 dq 0
 %assign i i+1
 %endrep
