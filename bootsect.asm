@@ -1,8 +1,6 @@
     [ORG 0x7c00]
     [BITS 16]
 
-%define ADDRESS(x) (BASE_ADDR + x - $$)
-
     BOOT_START equ 0x7c00
     BASE_ADDR  equ BOOT_START
     global _start
@@ -171,11 +169,11 @@ _int13_extensions_not_supported: db "int 13h extensions not supported.", 0
     dw 0xaa55
     REST_OF_BOOT_START equ $
 
+    %include "macro.asm"
     %include "format.asm"
-    %include "logger.asm"
-    ;%include "paging.asm"
-    ; TODO: split pic and idt into separate files
-    %include "interrupt.asm"
+    %include "log.asm"
+    %include "pic.asm"
+    %include "idt.asm"
     %include "ihda.asm"
     %include "bootend.asm"
     %include "audio_file.asm"

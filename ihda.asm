@@ -13,15 +13,10 @@ stage_2:
 
     push _ihda
     call puts
-    add esp, 0x04
+    pop eax
 
     call PIC_init
     call IDT_init_interrupts
-
-    ;;; IMPORTANT: enable interrupts
-    sti
-
-    call turn_off_disk_irqs
 
     push (AUDIO_FILE_END - AUDIO_FILE_START) >> 9
     push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) & 0xFFFFFFFF
@@ -43,12 +38,11 @@ stage_2:
     call audio_file_info
     ;;; plays test audio
     call test_audio
-loop:
+
     ;;; fills initial buffer
     call audio_file_init
     ;;; fills audio buffer as it plays
     call fill_audio_buffer
-    jmp loop
 
 hang:
     push _hang
@@ -82,8 +76,17 @@ disk_read:
     push esi
     push ebx
 
+    push _disk_read
+    call puts
+    pop eax
+
     mov edi, 0xFFFF
     mov ebx, dword [ebp+0x14]
+
+    push ebx
+    call progress_bar_init
+    pop eax
+
     mov edx, dword [ebp+0x10]
     mov ecx, dword [ebp+0x0C]
     mov eax, dword [ebp+0x08]
@@ -229,10 +232,14 @@ ata_pio_read:
     jnz .end                 ; ZF clear when jmping to .end
 
 .ready:
-    inc byte [0xB8000]       ; indicate spin loop
     mov dx, DATA_REG
     mov cx, 256
     rep insw
+
+    push 1
+    call progress_bar_step
+    pop eax
+
     mov dx, STS_REG
     in al, dx                ; delay 400ns to allow drive to set new values of BSY and DRQ
     in al, dx
@@ -490,11 +497,7 @@ test_audio:
     push edx
     mov ebx, edx
     shl ebx, 5
-    shr cl, 4
-    push ecx
-    push 2
-    push _stream_io_info
-    call printf
+
 ;;; ebx contains offset to first output stream descriptor
     add ebx, 0x80
     mov eax, dword [hda.mmio]
@@ -530,9 +533,9 @@ test_audio:
     movzx edx, byte [edx+W_CODEC]
     movzx eax, ax
     or eax, 0x020000
-    mov dword [esp+0x08], eax         ; set format verb
-    mov dword [esp+0x04], edi         ; audio output node index
-    mov dword [esp+0x00], edx         ; codec address
+    push eax                          ; set format verb
+    push edi                          ; audio output node index
+    push edx                          ; codec address
     call codec_query
     test eax, edx
     jz .next0
@@ -569,12 +572,11 @@ test_audio:
     mov dword [eax+SSYNC], 0         ; enable stream 1 in ssync
     or dword [ebx], 1 << 1           ; set stream run bit
 
-    add esp, 0x10
+    add esp, 0x0C
     pop ebx
     pop esi
     pop edi
     leave
-    ret
     ret
 
 CORB_init:
@@ -1343,6 +1345,70 @@ pci_write:
     leave
     ret
 
+;;; ebp+0x08 -> max
+progress_bar_init:
+    push ebp
+    mov ebp, esp
+    push ebx
+
+    mov ecx, 160
+    mov eax, dword [cursor_offset]
+    add eax, ecx
+    mov ebx, eax
+    xor edx, edx
+    div ecx
+    sub ebx, edx
+    mov dword [cursor_offset], ebx
+    sub ebx, ecx
+    mov word [0xB8000+ebx], 0x0F5B
+    mov word [0xB8000+ebx+158], 0x0F5D
+    add ebx, 2
+    mov eax, dword [ebp+0x08]
+    mov dword [progress_bar_cursor_offset], ebx
+    mov dword [progress_bar_offset], 0
+    mov dword [progress_bar_max], eax
+    mov dword [progress_bar_cur], 0
+
+    pop ebx
+    leave
+    ret
+
+;;; ebp + 0x08 -> amount to step by
+progress_bar_step:
+    push ebp
+    mov ebp, esp
+    push edi
+
+    mov eax, dword [ebp+0x08]
+    mov edi, dword [progress_bar_offset]
+    add eax, dword [progress_bar_cur]
+    mov ecx, dword [progress_bar_max]
+    mov dword [progress_bar_cur], eax
+
+    cmp eax, ecx
+    ja .end
+
+    imul eax, 78
+    xor edx, edx
+    div ecx
+    shl eax, 1
+
+    mov ecx, eax
+    sub ecx, edi
+    lea eax, [edi + ecx]
+    mov dword [progress_bar_offset], eax
+    shr cl, 1
+
+    add edi, 0xB8000
+    add edi, dword [progress_bar_cursor_offset]
+    mov ax, 0x0F3D
+    rep stosw
+
+.end:
+    pop edi
+    leave
+    ret
+
 ;;; strings/data
 _no_hda: db `no hda device found.`, 0
 _ok_hda:
@@ -1397,6 +1463,13 @@ _ihda: db `IHDA START\n`, 0
 _audio_file_expected: db `expected %8x, found %8x\n`, 0
 _invalid_sample_rate: db `invalid sample rate. must be a multiple or divisor of 44.1 khz or 48 khz\n`, 0
 _audio_file_format: db `base rate:%d.mul:%d.div:%d.bps:%d.chan:%d.\n`, 0
+_disk_read: db `reading file from disk\n`, 0
+_debug: db `%d:%d\n`, 0
+
+progress_bar_cursor_offset: dd 0
+progress_bar_offset: dd 0
+progress_bar_max: dd 0
+progress_bar_cur: dd 0
 
 widget_types:
 dd _audio_output
