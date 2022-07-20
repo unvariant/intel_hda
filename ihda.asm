@@ -399,31 +399,7 @@ audio_file_format:
     shl ax, 4
     ;;; set number of channels
     or al, cl
-    push eax
-    movzx edx, al
-    and dl, 0b1111    ; chan
-    push edx
-    shr ax, 4
-    mov dl, al
-    and dl, 0b111     ; bps
-    push edx
-    shr ax, 4
-    mov dl, al
-    and dl, 0b111     ; divisor
-    push edx
-    shr ax, 3
-    mov dl, al
-    and dl, 0b111     ; multiplier
-    push edx
-    shr ax, 3
-    mov dl, al
-    and dl, 0b1       ; base rate
-    push edx
-    push 5
-    push _audio_file_format
-    call printf
-    add esp, 0x1C
-    pop eax
+
     ret
 
 .invalid_sample_rate:
@@ -813,8 +789,8 @@ widget_info:
     push edi
     push esi
     push ebx
+
     MALLOC edi, W_SIZE
-    push 0x00                  ; padding
     push 0xF0000 | 0x09        ; get paramter
     movzx eax, byte [ebp+0x0C] ; node index
     mov byte [edi+W_NID], al
@@ -914,37 +890,11 @@ widget_info:
     cmp al, byte [edi+W_CONLEN]
     jl .get_connection_list_entries
 
-    mov dword [esp], edi
-    call connection_list_info
-
 .skip_connection_list_entries:
     mov dword [esp], edi
     call add_widget_entry
 
-    movzx eax, byte [edi+W_CONTYPE]
-    mov edx, dword [port_connection_types+eax*4]
-    mov dword [esp+0x0C], edx
-    mov al, byte [edi+W_SEQUENCE]
-    mov dword [esp+0x08], eax
-    mov al, byte [edi+W_ASSOCIATION]
-    mov dword [esp+0x04], eax
-    mov al, byte [edi+W_DEVICEDEFAULT]
-    mov edx, dword [device_types+eax*4]
-    mov dword [esp+0x00], edx
-    mov al, byte [edi+W_TYPE]
-    mov edx, dword [widget_types+eax*4]
-    push edx
-    mov al, byte [ebp+0x0C]
-    push eax
-    mov al, byte [ebp+0x08]
-    push eax
-    mov al, byte [edi+W_CONLEN]
-    push eax
-    push 8
-    push _widget_info
-    call printf
-
-    add esp, 0x28
+    add esp, 0x0C
     pop ebx
     pop esi
     pop edi
@@ -955,31 +905,25 @@ AFG_enumerate:
     push esi
     push edi
     push ebx
+
     push 0xf0000 | 0x04
     movzx eax, byte [afg.nid]
     push eax
     movzx ebx, byte [afg.codec]
     push ebx
     call codec_query
-    add esp, 0x04
     movzx esi, al     ; widget count
     shr eax, 0x10
     movzx edi, al     ; widget start node
     add esi, edi      ; ending widget
-    mov dword [esp+0x00], ebx
-    push esi
-    push edi
-    push 2
-    push _AFG_node_info
-    call printf
-    add esp, 0x10
 .loop:
     mov dword [esp+0x04], edi
     call widget_info
     inc edi
     cmp edi, esi
     jnz .loop
-    add esp, 4
+
+    add esp, 0x0C
     pop ebx
     pop edi
     pop esi
@@ -992,6 +936,7 @@ codec_enumerate:
     push esi
     push edi
     push ebx
+
     mov eax, dword [ebp+0x08]
     push 0xf0000 | 0x04
     push 0x00
@@ -1004,14 +949,6 @@ codec_enumerate:
     ;;; reuse existing stack space
     ;;; set command data
     mov dword [esp+0x08], 0xF0000 | 0x05
-    push esi
-    push edi
-    mov eax, dword [ebp+0x08]
-    push eax
-    push 3
-    push _codec_info
-    call printf
-    add esp, 0x14
 .loop:
     ;;; command is unmodified and still on stack
     ;;; set node index
@@ -1035,7 +972,7 @@ codec_enumerate:
     jnz .loop
     xor eax, eax
 .end:
-    add esp, 0x0C        ; function call stack space
+    add esp, 0x0C
     pop ebx
     pop edi
     pop esi
@@ -1047,6 +984,7 @@ hda_AFG_init:
     mov ebp, esp
     push esi
     push edi
+
     xor edi, edi
     mov esi, dword [hda.mmio]
     mov si, word [esi+STATESTS]
@@ -1153,13 +1091,6 @@ find_hda:
     mov word [hda.bus], si
     mov word [hda.device], di
     mov word [hda.function], bx
-    push eax
-    shr ax, 8
-    push eax
-    push 2
-    push _ok_hda.class
-    call printf
-    add esp, 0x10
     push 0x04
     push ebx
     push edi
@@ -1182,11 +1113,6 @@ find_hda:
     add esp, 0x10
     and eax, ~0x0F
     mov dword [hda.mmio], eax
-    push eax
-    push 1
-    push _ok_hda.bar0
-    call printf
-    add esp, 0x0C
 .end:
     pop ebx
     pop edi
@@ -1292,10 +1218,8 @@ find_outputs:
     ret
 
 find_outputs_fail:
-    push 0
     push _find_outputs_fail
-    call printf
-    add esp, 0x08
+    call puts
     jmp hang
 
 %macro PCI_CONFIG_ADDR 0
@@ -1411,18 +1335,10 @@ progress_bar_step:
 
 ;;; strings/data
 _no_hda: db `no hda device found.`, 0
-_ok_hda:
-.class:  db `class:%2x.subclass:%2x.\n`, 0
-.bar0:   db `bar0:%x.\n`, 0
 _hang:   db `hang.`, 0
 _no_CORB_size: db `no CORB sizes found.`, 0
 _no_RIRB_size: db `no RIRB sizes found.`, 0
 _reset_CORB_rp_fail: db `failed to reset CORB read pointer.`, 0
-_display_STATESTS: db `STATESTS:%4x.`, 0
-_RIRBWP: db `RIRBWP:%4x.`, 0
-_CORBWP: db `CORBWP:%4x.`, 0
-_CORBRP: db `CORBRP:%4x.`, 0
-_codec_info: db `codec %d. nodes:start:%d,end:%d.\n`, 0
 _no_AFG: db `no audio function group found.`, 0
 _audio_output: db `audio output`, 0
 _audio_input: db `audio input`, 0
@@ -1452,19 +1368,17 @@ _no_connection: db `none`, 0
 _internal_connection: db `internal`, 0
 _both_connections: db `both`, 0
 _unknown: db `unknown`, 0
-_widget_info: db `len:%d.codec:%2x,nid:%2x,%s,%s,order:%2x,%2x,con:%s.\n`, 0
-_AFG_node_info: db `AFG widgets. nodes:start:%d,end:%d.\n`, 0
 _connection_list_entry: db `entry:%4x.\n`, 0
-_stream_io_info: db `output streams:%d,input streams:%d.\n`, 0
 _set_converter_format_fail: db `failed to set converter format.\n`, 0
 _enable_pin_complex_fail: db `failed to enable pin complex.\n`, 0
 _find_outputs_fail: db `failed to find output widgets\n`, 0
 _ihda: db `IHDA START\n`, 0
 _audio_file_expected: db `expected %8x, found %8x\n`, 0
 _invalid_sample_rate: db `invalid sample rate. must be a multiple or divisor of 44.1 khz or 48 khz\n`, 0
-_audio_file_format: db `base rate:%d.mul:%d.div:%d.bps:%d.chan:%d.\n`, 0
 _disk_read: db `reading file from disk\n`, 0
-_debug: db `%d:%d\n`, 0
+_AFG_enumerate: db `AFG enumerate\n`, 0
+_codec_enumerate: db `codec enumerate\n`, 0
+_widget_info: db `widget info\n`, 0
 
 progress_bar_cursor_offset: dd 0
 progress_bar_offset: dd 0
