@@ -1,4 +1,4 @@
-AUDIO_FILE = victory.wav
+AUDIO_FILE = audio.wav
 
 qemu: OS.bin
 	qemu-system-i386 -device intel-hda,debug=10 -device hda-duplex -drive if=ide,format=raw,index=0,file=OS.bin

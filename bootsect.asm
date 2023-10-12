@@ -13,6 +13,8 @@ _start:
     mov fs, ax
     mov gs, ax
 
+    mov byte [boot_drive], dl
+
     mov sp, 0x7c00
 
     mov al, 03h
@@ -54,7 +56,7 @@ check_int13_extensions:
     push _int13_extensions_not_supported
     mov ah, 0x41
     mov bx, 0x55aa
-    mov dl, 0x80
+    mov dl, byte [boot_drive]
     int 13h
     jc error
     add sp, 2
@@ -89,7 +91,7 @@ int_13h_disk_read:
     push ax
     push _disk_read_error
     mov ah, 0x42
-    mov dl, 0x80
+    mov dl, byte [boot_drive]
     xor si, si
     mov ds, si
     mov si, packet
@@ -150,6 +152,7 @@ gdt:
 BOOT_SECTORS equ (BOOT_END - REST_OF_BOOT_START) >> 9
 AUDIO_FILE_SECTORS equ (AUDIO_FILE_END - AUDIO_FILE_START) >> 9
 
+    align 4
 packet:
 .size           dw 16
 .block_count    dw 0
@@ -158,6 +161,8 @@ packet:
 .block_low      dd 0
 .block_high     dw 0
                 dw 0
+
+boot_drive: db 0
 
 TERM_COLOR equ 0x0F
 
