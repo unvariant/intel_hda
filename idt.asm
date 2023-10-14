@@ -22,15 +22,41 @@ trap32_error_handler:
     add esp, 0x04
     iret
 
+_keystroke: db `key: %x\n`, 0
+handle_keyboard:
+    pusha
+
+    xor     eax,    eax
+    in      al,     0x60
+
+    cmp     al,     0x25
+    jz      .scroll_up
+
+    cmp     al,     0x24
+    jz      .scroll_down
+
+.done:
+    call    flush
+    PIC_SEND_EOI 1
+
+    popa
+    iret
+
+.scroll_up:
+    mov     eax,    dword [screen_offset]
+    mov     ecx,    eax
+    sub     ecx,    80
+    cmovge  eax,    ecx
+    mov     dword [screen_offset], eax
+    jmp     .done
+.scroll_down:
+    add     dword [screen_offset], 80
+    jmp     .done
+
+
 %macro STUB_IRQ 1
 stub_irq %+ %1:
-    push eax
-    mov eax, dword [cursor_offset]
-    mov word [0xB8000 + eax], (0x0F << 8) | (0x30 + %1)
-    add dword [cursor_offset], 2
-    in al, 0x60
     PIC_SEND_EOI %1
-    pop eax
     iret
 %endmacro
 
@@ -63,7 +89,7 @@ segment_not_present:            dq TRAP32_ERROR_ENTRY
 stack_segment_fault:            dq TRAP32_ERROR_ENTRY
 general_protection_fault:       dq TRAP32_ERROR_ENTRY
 page_fault:                     dq TRAP32_ERROR_ENTRY
-dq 0
+triple_fault:                   dq 0
 x87_fpu_exception:              dq TRAP32_ENTRY
 alignment_check:                dq TRAP32_ERROR_ENTRY
 machine_check:                  dq TRAP32_ENTRY
@@ -77,7 +103,7 @@ security_exception:             dq TRAP32_ERROR_ENTRY
 dq 0
 ;;; next 8 are IRQ 0..7
 dq IDT_INT32(stub_irq0)
-dq IDT_INT32(stub_irq1)
+dq IDT_INT32(handle_keyboard)
 dq IDT_INT32(stub_irq2)
 dq IDT_INT32(stub_irq3)
 dq IDT_INT32(stub_irq4)

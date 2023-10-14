@@ -2,6 +2,12 @@
 STACK_TOP         equ 0x200000   ; 2 MB
 AUDIO_FILE_BUFFER equ 0x400000   ; 4 MB
 
+    _find_hda: db `FIND HDA\n`, 0
+    _hda_init: db `HDA INIT\n`, 0
+    _find_outputs: db `FIND OUTPUTS\n`, 0
+    _audio_file_info: db `AUDIO FILE INFO\n`, 0
+    _log_volume_knob: db `VOLUME KNOB: %x\n`, 0
+
 stage_2:
     mov ax, DATA_DESC
     mov ds, ax
@@ -11,31 +17,57 @@ stage_2:
     mov ss, ax
     mov esp, STACK_TOP    ; 2 MB
 
+    call PIC_init
+    call IDT_init_interrupts
+
+    call help_banner
+
     push _ihda
     call puts
     pop eax
 
-    call PIC_init
-    call IDT_init_interrupts
-
-    push (AUDIO_FILE_END - AUDIO_FILE_START) >> 9
-    push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) & 0xFFFFFFFF
-    push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) >> 32
-    push AUDIO_FILE_BUFFER
-    call disk_read
+    ;push (AUDIO_FILE_END - AUDIO_FILE_START) >> 9
+    ;push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) & 0xFFFFFFFF
+    ;push (ADDRESS(AUDIO_FILE_START - BOOT_START) >> 9) >> 32
+    ;push AUDIO_FILE_BUFFER
+    ;call disk_read
 
     ;;; determines hda bus, device, and function numbers
     call find_hda
+
+    push _hda_init
+    call puts
+    pop eax
+
     ;;; attempts to find an audio function group (AFG)
     ;;; then enumerates through all the codecs present in the audio function group
     ;;; in each codec sorts the widgets it finds
     call hda_init
 
+    push _find_outputs
+    call puts
+    pop eax
+
     ;;; finds an output pin complex widget that is connected to an audio output widget
     call find_outputs
 
+    push _audio_file_info
+    call puts
+    pop eax
+
     ;;; extract information from the audio file, expects wav format
     call audio_file_info
+
+    mov eax, dword [widgets.volume_knob]
+    push eax
+    push 1
+    push _log_volume_knob
+    call printf
+
+    push _playing_audio
+    call puts
+    pop eax
+
     ;;; plays test audio
     call test_audio
 
@@ -43,11 +75,12 @@ stage_2:
     call audio_file_init
     ;;; fills audio buffer as it plays
     call fill_audio_buffer
-
 hang:
     push _hang
     call puts
     jmp $
+
+_playing_audio: db `BEGINNING AUDIO PLAYBACK\n`, 0
 
 ;;; calling convention used follows the calling convention specified in the system V abi for i386
 ;;; paramters are passed on the stack in reverse order, such that the first paramter
@@ -100,6 +133,14 @@ disk_read:
     push eax
 .read:
     call ata_pio_read
+    jz .disk_read_ok
+
+    push _ata_read_error
+    call puts
+    
+    jmp hang
+
+.disk_read_ok:
     mov eax, dword [esp+0x0C]
     add dword [esp+0x08], eax
     adc dword [esp+0x04], 0
@@ -714,8 +755,23 @@ codec_query:
     call CORB_write
     add esp, 4
     call RIRB_read
+;;; bit 35 is set to 1 to indicate valid GET response
+;;; however response is all zeros for SET responses
+    bt edx, 3
+    jc .valid
+    push eax
+    push edx
+    push 2
+    push _warn_invalid_response
+    call printf
+    add esp, 8
+    pop edx
+    pop eax
+.valid:
     leave
     ret
+
+_warn_invalid_response: db `WARN: INVALID RIRB RESPONSE: [hi:lo] %x:%x\n`, 0
 
 ;;; ebp+0x08 -> pointer to widget struct
 connection_list_info:
@@ -1008,7 +1064,6 @@ hda_AFG_init:
     pop esi
     leave
     ret
-    ret
 
 hda_init:
     push ebp
@@ -1042,7 +1097,7 @@ hda_init:
     jz .confirm_reset
 
     mov word [eax+WAKEEN], 0x7FFF
-    mov dword [eax+INTCTL], 0xC00000FF
+    mov dword [eax+INTCTL], 0 ; 0xC00000FF
 
     call CORB_init
     call RIRB_init
@@ -1276,13 +1331,13 @@ progress_bar_init:
     push ebx
 
     mov ecx, 160
-    mov eax, dword [cursor_offset]
+    mov eax, dword [write_offset]
     add eax, ecx
     mov ebx, eax
     xor edx, edx
     div ecx
     sub ebx, edx
-    mov dword [cursor_offset], ebx
+    mov dword [write_offset], ebx
     sub ebx, ecx
     mov word [0xB8000+ebx], 0x0F5B
     mov word [0xB8000+ebx+158], 0x0F5D
@@ -1379,6 +1434,7 @@ _disk_read: db `reading file from disk\n`, 0
 _AFG_enumerate: db `AFG enumerate\n`, 0
 _codec_enumerate: db `codec enumerate\n`, 0
 _widget_info: db `widget info\n`, 0
+_ata_read_error: db `disk read error`, 0
 
 progress_bar_cursor_offset: dd 0
 progress_bar_offset: dd 0

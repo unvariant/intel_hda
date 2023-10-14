@@ -3,6 +3,8 @@
 
     BOOT_START equ 0x7c00
     BASE_ADDR  equ BOOT_START
+    %define ADDRESS(x) (BASE_ADDR + x - $$)
+    
     global _start
 
 _start:
@@ -66,18 +68,13 @@ check_int13_extensions:
     mov ecx, BOOT_SECTORS
     call int_13h_disk_read
 
-protected_mode:
-    lgdt [gdt.desc]
-    mov eax, cr0
-    or al, 1
-    mov cr0, eax
-    jmp 0x08:stage_2
+    jmp _bootstrap
 
 ;;; edi -> 32 bit buffer address
 ;;; esi -> disk block number
 ;;; ecx -> number of sectors to transfer
 int_13h_disk_read:
-    mov ebx, 128
+    mov ebx, 64
     mov dword [packet.block_low], esi
     mov dword [packet.buffer_offset], edi
     shl word [packet.buffer_segment], 12
@@ -174,6 +171,7 @@ _int13_extensions_not_supported: db "int 13h extensions not supported.", 0
     dw 0xaa55
     REST_OF_BOOT_START equ $
 
+    %include "bootstrap.asm"
     %include "macro.asm"
     %include "format.asm"
     %include "log.asm"

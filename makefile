@@ -1,7 +1,7 @@
 AUDIO_FILE = audio.wav
 
 qemu: OS.bin
-	qemu-system-i386 -device intel-hda,debug=10 -device hda-duplex -drive if=ide,format=raw,index=0,file=OS.bin
+	qemu-system-i386 -m 64M -device intel-hda,debug=0 -device hda-output -drive if=ide,format=raw,index=0,file=OS.bin
 
 bochs: OS.bin
 	bochs -f .bochsrc
@@ -16,4 +16,4 @@ bootsect.bin: bootsect.asm
 	AUDIO_FILE=$(AUDIO_FILE) nasm -f bin bootsect.asm -o bootsect.bin
 
 clean:
-	rm *.bin
+	-rm *.bin

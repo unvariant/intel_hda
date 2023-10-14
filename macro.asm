@@ -16,5 +16,3 @@
 %macro IO_WAIT 0
     out 0x80, al
 %endmacro
-
-%define ADDRESS(x) (BASE_ADDR + x - $$)

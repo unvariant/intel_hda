@@ -38,7 +38,7 @@ SECONDARY_PIC_VECTOR equ 0x28
 %if %1 > 7
     OUTB SECONDARY_PIC_CMD, PIC_EOI
 %endif
-OUTB PRIMARY_PIC_CMD, PIC_EOI
+    OUTB PRIMARY_PIC_CMD, PIC_EOI
     pop edx
     pop eax
 %endmacro
@@ -92,14 +92,6 @@ PIC_init:
     ; OUTB PRIMARY_PIC_DATA, bl
     ; OUTB SECONDARY_PIC_DATA, bh
 
-    OUTB PRIMARY_PIC_DATA, 0x01
-    OUTB SECONDARY_PIC_DATA, 0x00
-    ret
-
-PIC_send_EOI:
-    cmp al, 8
-    jl .skip_secondary
-    OUTB SECONDARY_PIC_CMD, PIC_EOI
-.skip_secondary:
-    OUTB PRIMARY_PIC_CMD, PIC_EOI
+    OUTB PRIMARY_PIC_DATA,   0b11111101
+    OUTB SECONDARY_PIC_DATA, 0b11111111
     ret

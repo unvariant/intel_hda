@@ -2,6 +2,7 @@
 Tested devices:
 - Qemu version 7.0.0 on macOS Monterey 12.4
 - Intel Core 2 Duo
+- Lenovo T480 (WIP)
 
 To run:
 ```
